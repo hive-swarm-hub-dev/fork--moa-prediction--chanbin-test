@@ -1,9 +1,8 @@
 import pandas as pd
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.multiclass import OneVsRestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.neural_network import MLPClassifier
 
 # Load data
 train_features = pd.read_csv("data/train_features.csv")
@@ -24,35 +23,24 @@ all_features["cp_dose"] = LabelEncoder().fit_transform(all_features["cp_dose"])
 gene_cols = [c for c in all_features.columns if c.startswith("g-")]
 cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 
-# Standardize before PCA
-gene_scaler = StandardScaler()
-cell_scaler = StandardScaler()
-gene_scaled = gene_scaler.fit_transform(all_features[gene_cols])
-cell_scaled = cell_scaler.fit_transform(all_features[cell_cols])
+# Standardize
+scaler = StandardScaler()
+numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# PCA — more components to capture more signal
+# PCA
 pca_gene = PCA(n_components=100, random_state=42)
-gene_pca = pca_gene.fit_transform(gene_scaled)
+gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
 
 pca_cell = PCA(n_components=30, random_state=42)
-cell_pca = pca_cell.fit_transform(cell_scaled)
-
-# Also add variance/stats features
-gene_var = np.var(gene_scaled, axis=1, keepdims=True)
-gene_mean = np.mean(gene_scaled, axis=1, keepdims=True)
-cell_var = np.var(cell_scaled, axis=1, keepdims=True)
-cell_mean = np.mean(cell_scaled, axis=1, keepdims=True)
+cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
 
 # Build feature matrix
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
     gene_pca,
     cell_pca,
-    gene_var, gene_mean,
-    cell_var, cell_mean,
 ])
 
-# Final scaling
 final_scaler = StandardScaler()
 X_all = final_scaler.fit_transform(X_all)
 
@@ -61,23 +49,32 @@ X_train = X_all[:n_train]
 X_test = X_all[n_train:]
 y_train = train_targets[target_cols].values
 
-# Train on treatment samples only
+# Treatment samples only
 train_trt_idx = np.where(~train_ctrl_mask.values)[0]
-X_train_trt = X_train[train_trt_idx]
-y_train_trt = y_train[train_trt_idx]
+X_trt = X_train[train_trt_idx]
+y_trt = y_train[train_trt_idx]
 
-# Logistic regression with tuned regularization
-model = OneVsRestClassifier(
-    LogisticRegression(C=0.1, max_iter=2000, solver="lbfgs"),
-    n_jobs=-1,
+# MLP — multi-output natively, captures non-linear interactions
+model = MLPClassifier(
+    hidden_layer_sizes=(256, 128),
+    activation="relu",
+    solver="adam",
+    alpha=0.001,
+    batch_size=256,
+    learning_rate="adaptive",
+    learning_rate_init=0.001,
+    max_iter=200,
+    early_stopping=True,
+    validation_fraction=0.1,
+    n_iter_no_change=10,
+    random_state=42,
+    verbose=False,
 )
-model.fit(X_train_trt, y_train_trt)
+model.fit(X_trt, y_trt)
 test_preds = model.predict_proba(X_test)
 
-# Clip predictions
+# Clip and zero controls
 test_preds = np.clip(test_preds, 1e-15, 1 - 1e-15)
-
-# Zero out control samples
 test_ctrl_indices = np.where(test_ctrl_mask.values)[0]
 test_preds[test_ctrl_indices] = 1e-15
 
