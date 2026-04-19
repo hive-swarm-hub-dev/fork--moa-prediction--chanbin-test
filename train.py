@@ -5,6 +5,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.neural_network import MLPClassifier
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import VarianceThreshold
 
 # Load data
 train_features = pd.read_csv("data/train_features.csv")
@@ -29,18 +30,32 @@ cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 scaler = StandardScaler()
 numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# PCA
-pca_gene = PCA(n_components=200, random_state=42)
-gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
-pca_cell = PCA(n_components=60, random_state=42)
-cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
+# Remove low-variance features before PCA
+vt = VarianceThreshold(threshold=0.5)
+numeric_filtered = vt.fit_transform(numeric_data)
+n_gene_filtered = sum(vt.get_support()[:len(gene_cols)])
+n_cell_filtered = sum(vt.get_support()[len(gene_cols):])
+print(f"After variance filter: {n_gene_filtered} gene, {n_cell_filtered} cell features")
+
+# PCA on filtered features
+n_gene_pca = min(200, n_gene_filtered)
+n_cell_pca = min(60, n_cell_filtered)
+
+# Split back into gene/cell for separate PCA
+gene_mask = vt.get_support()[:len(gene_cols)]
+cell_mask = vt.get_support()[len(gene_cols):]
+gene_filtered = numeric_data[:, :len(gene_cols)][:, gene_mask]
+cell_filtered = numeric_data[:, len(gene_cols):][:, cell_mask]
+
+pca_gene = PCA(n_components=n_gene_pca, random_state=42)
+gene_pca = pca_gene.fit_transform(gene_filtered)
+pca_cell = PCA(n_components=n_cell_pca, random_state=42)
+cell_pca = pca_cell.fit_transform(cell_filtered)
 
 # Stats features
-gene_data = numeric_data[:, :len(gene_cols)]
-cell_data = numeric_data[:, len(gene_cols):]
-gene_var = np.var(gene_data, axis=1, keepdims=True)
-gene_skew = np.mean(gene_data**3, axis=1, keepdims=True)
-cell_var = np.var(cell_data, axis=1, keepdims=True)
+gene_var = np.var(gene_filtered, axis=1, keepdims=True)
+gene_skew = np.mean(gene_filtered**3, axis=1, keepdims=True)
+cell_var = np.var(cell_filtered, axis=1, keepdims=True)
 
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
@@ -58,7 +73,7 @@ y_train = train_targets[target_cols].values
 trt_idx = np.where(~train_ctrl_mask.values)[0]
 X_trt, y_trt = X_train[trt_idx], y_train[trt_idx]
 
-# Diverse MLP ensemble — different architectures and seeds
+# Diverse MLP ensemble
 configs = [
     ((512, 256), 0.0005, 42),
     ((512, 256), 0.0005, 123),
@@ -86,18 +101,22 @@ for layers, alpha, seed in configs:
     )
     mlp.fit(X_trt, y_trt)
     mlp_preds_list.append(mlp.predict_proba(X_test))
-    print(f"MLP {layers} alpha={alpha} seed={seed} done")
+    print(f"MLP {layers} seed={seed} done")
 
 mlp_preds = np.mean(mlp_preds_list, axis=0)
 
-# LogReg
-lr = OneVsRestClassifier(
-    LogisticRegression(C=0.1, max_iter=2000, solver="lbfgs"),
-    n_jobs=-1,
-)
-lr.fit(X_trt, y_trt)
-lr_preds = lr.predict_proba(X_test)
-print("LogReg done")
+# Multiple LogReg models with different C values for diversity
+lr_preds_list = []
+for c_val in [0.05, 0.1, 0.2]:
+    lr = OneVsRestClassifier(
+        LogisticRegression(C=c_val, max_iter=2000, solver="lbfgs"),
+        n_jobs=-1,
+    )
+    lr.fit(X_trt, y_trt)
+    lr_preds_list.append(lr.predict_proba(X_test))
+    print(f"LogReg C={c_val} done")
+
+lr_preds = np.mean(lr_preds_list, axis=0)
 
 # Blend
 test_preds = 0.7 * mlp_preds + 0.3 * lr_preds
