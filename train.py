@@ -5,7 +5,6 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.neural_network import MLPClassifier
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.feature_selection import VarianceThreshold
 
 # Load data
 train_features = pd.read_csv("data/train_features.csv")
@@ -30,37 +29,38 @@ cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 scaler = StandardScaler()
 numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# Remove low-variance features before PCA
-vt = VarianceThreshold(threshold=0.5)
-numeric_filtered = vt.fit_transform(numeric_data)
-n_gene_filtered = sum(vt.get_support()[:len(gene_cols)])
-n_cell_filtered = sum(vt.get_support()[len(gene_cols):])
-print(f"After variance filter: {n_gene_filtered} gene, {n_cell_filtered} cell features")
+# PCA
+pca_gene = PCA(n_components=200, random_state=42)
+gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
+pca_cell = PCA(n_components=60, random_state=42)
+cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
 
-# PCA on filtered features
-n_gene_pca = min(200, n_gene_filtered)
-n_cell_pca = min(60, n_cell_filtered)
+# Stats
+gene_data = numeric_data[:, :len(gene_cols)]
+cell_data = numeric_data[:, len(gene_cols):]
+gene_var = np.var(gene_data, axis=1, keepdims=True)
+gene_skew = np.mean(gene_data**3, axis=1, keepdims=True)
+gene_kurt = np.mean(gene_data**4, axis=1, keepdims=True) - 3
+cell_var = np.var(cell_data, axis=1, keepdims=True)
+cell_skew = np.mean(cell_data**3, axis=1, keepdims=True)
 
-# Split back into gene/cell for separate PCA
-gene_mask = vt.get_support()[:len(gene_cols)]
-cell_mask = vt.get_support()[len(gene_cols):]
-gene_filtered = numeric_data[:, :len(gene_cols)][:, gene_mask]
-cell_filtered = numeric_data[:, len(gene_cols):][:, cell_mask]
+# Interaction features: top PCA components * cp_time and cp_dose
+cp_time = all_features["cp_time"].values.reshape(-1, 1) / 72.0  # normalize
+cp_dose = all_features["cp_dose"].values.reshape(-1, 1)
 
-pca_gene = PCA(n_components=n_gene_pca, random_state=42)
-gene_pca = pca_gene.fit_transform(gene_filtered)
-pca_cell = PCA(n_components=n_cell_pca, random_state=42)
-cell_pca = pca_cell.fit_transform(cell_filtered)
-
-# Stats features
-gene_var = np.var(gene_filtered, axis=1, keepdims=True)
-gene_skew = np.mean(gene_filtered**3, axis=1, keepdims=True)
-cell_var = np.var(cell_filtered, axis=1, keepdims=True)
+# Top 10 gene PCA * time/dose
+gene_time_interact = gene_pca[:, :10] * cp_time
+gene_dose_interact = gene_pca[:, :10] * cp_dose
+cell_time_interact = cell_pca[:, :5] * cp_time
+cell_dose_interact = cell_pca[:, :5] * cp_dose
 
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
     gene_pca, cell_pca,
-    gene_var, gene_skew, cell_var,
+    gene_var, gene_skew, gene_kurt,
+    cell_var, cell_skew,
+    gene_time_interact, gene_dose_interact,
+    cell_time_interact, cell_dose_interact,
 ])
 
 final_scaler = StandardScaler()
@@ -85,19 +85,11 @@ configs = [
 mlp_preds_list = []
 for layers, alpha, seed in configs:
     mlp = MLPClassifier(
-        hidden_layer_sizes=layers,
-        activation="relu",
-        solver="adam",
-        alpha=alpha,
-        batch_size=256,
-        learning_rate="adaptive",
-        learning_rate_init=0.001,
-        max_iter=300,
-        early_stopping=True,
-        validation_fraction=0.1,
-        n_iter_no_change=15,
-        random_state=seed,
-        verbose=False,
+        hidden_layer_sizes=layers, activation="relu", solver="adam",
+        alpha=alpha, batch_size=256, learning_rate="adaptive",
+        learning_rate_init=0.001, max_iter=300, early_stopping=True,
+        validation_fraction=0.1, n_iter_no_change=15,
+        random_state=seed, verbose=False,
     )
     mlp.fit(X_trt, y_trt)
     mlp_preds_list.append(mlp.predict_proba(X_test))
@@ -105,12 +97,11 @@ for layers, alpha, seed in configs:
 
 mlp_preds = np.mean(mlp_preds_list, axis=0)
 
-# Multiple LogReg models with different C values for diversity
+# Multi-C LogReg
 lr_preds_list = []
 for c_val in [0.05, 0.1, 0.2]:
     lr = OneVsRestClassifier(
-        LogisticRegression(C=c_val, max_iter=2000, solver="lbfgs"),
-        n_jobs=-1,
+        LogisticRegression(C=c_val, max_iter=2000, solver="lbfgs"), n_jobs=-1,
     )
     lr.fit(X_trt, y_trt)
     lr_preds_list.append(lr.predict_proba(X_test))
