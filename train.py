@@ -29,11 +29,11 @@ cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 scaler = StandardScaler()
 numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# PCA — use more components
-pca_gene = PCA(n_components=150, random_state=42)
+# PCA — push even higher
+pca_gene = PCA(n_components=200, random_state=42)
 gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
 
-pca_cell = PCA(n_components=50, random_state=42)
+pca_cell = PCA(n_components=60, random_state=42)
 cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
 
 # Stats features
@@ -64,27 +64,31 @@ train_trt_idx = np.where(~train_ctrl_mask.values)[0]
 X_trt = X_train[train_trt_idx]
 y_trt = y_train[train_trt_idx]
 
-# Model 1: MLP
-mlp = MLPClassifier(
-    hidden_layer_sizes=(512, 256),
-    activation="relu",
-    solver="adam",
-    alpha=0.0005,
-    batch_size=256,
-    learning_rate="adaptive",
-    learning_rate_init=0.001,
-    max_iter=300,
-    early_stopping=True,
-    validation_fraction=0.1,
-    n_iter_no_change=15,
-    random_state=42,
-    verbose=False,
-)
-mlp.fit(X_trt, y_trt)
-mlp_preds = mlp.predict_proba(X_test)
-print("MLP done")
+# Multi-seed MLP ensemble to reduce variance
+mlp_preds_list = []
+for seed in [42, 123, 777]:
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(512, 256),
+        activation="relu",
+        solver="adam",
+        alpha=0.0005,
+        batch_size=256,
+        learning_rate="adaptive",
+        learning_rate_init=0.001,
+        max_iter=300,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=15,
+        random_state=seed,
+        verbose=False,
+    )
+    mlp.fit(X_trt, y_trt)
+    mlp_preds_list.append(mlp.predict_proba(X_test))
+    print(f"MLP seed={seed} done")
 
-# Model 2: LogReg
+mlp_preds = np.mean(mlp_preds_list, axis=0)
+
+# LogReg
 lr = OneVsRestClassifier(
     LogisticRegression(C=0.1, max_iter=2000, solver="lbfgs"),
     n_jobs=-1,
@@ -93,7 +97,7 @@ lr.fit(X_trt, y_trt)
 lr_preds = lr.predict_proba(X_test)
 print("LogReg done")
 
-# Blend — MLP-heavy since it's been better
+# Blend
 test_preds = 0.7 * mlp_preds + 0.3 * lr_preds
 
 # Clip and zero controls
