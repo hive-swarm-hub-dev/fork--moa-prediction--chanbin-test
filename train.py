@@ -87,13 +87,12 @@ y_train = train_targets[target_cols].values
 trt_idx = np.where(~train_ctrl_mask.values)[0]
 X_trt, y_trt = X_train[trt_idx], y_train[trt_idx]
 
-# Diverse MLP ensemble — try wider networks
+# Diverse MLP ensemble — wider networks, lower alpha
 configs = [
-    ((768, 384), 0.0005, 42),
-    ((512, 256), 0.0005, 123),
+    ((768, 384), 0.0003, 42),
+    ((768, 384), 0.0003, 123),
     ((512, 256), 0.0005, 777),
-    ((512, 256, 128), 0.001, 42),
-    ((256, 128), 0.0003, 42),
+    ((512, 256, 128), 0.0008, 42),
 ]
 
 mlp_preds_list = []
@@ -123,8 +122,8 @@ for c_val in [0.05, 0.1, 0.2]:
 
 lr_preds = np.mean(lr_preds_list, axis=0)
 
-# Blend
-test_preds = 0.7 * mlp_preds + 0.3 * lr_preds
+# Blend — MLP-heavy since it's stronger
+test_preds = 0.75 * mlp_preds + 0.25 * lr_preds
 
 # Clip and zero controls
 test_preds = np.clip(test_preds, 1e-15, 1 - 1e-15)
