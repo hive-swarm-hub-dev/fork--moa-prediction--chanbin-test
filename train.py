@@ -29,11 +29,15 @@ cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 scaler = StandardScaler()
 numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# PCA
+# PCA at two scales
 pca_gene = PCA(n_components=200, random_state=42)
 gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
 pca_cell = PCA(n_components=60, random_state=42)
 cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
+
+# Second PCA on combined features (captures cross-modality patterns)
+pca_combined = PCA(n_components=50, random_state=42)
+combined_pca = pca_combined.fit_transform(numeric_data)
 
 # Stats
 gene_data = numeric_data[:, :len(gene_cols)]
@@ -44,31 +48,33 @@ gene_kurt = np.mean(gene_data**4, axis=1, keepdims=True) - 3
 cell_var = np.var(cell_data, axis=1, keepdims=True)
 cell_skew = np.mean(cell_data**3, axis=1, keepdims=True)
 
+# Percentile features
+gene_q25 = np.percentile(gene_data, 25, axis=1, keepdims=True)
+gene_q75 = np.percentile(gene_data, 75, axis=1, keepdims=True)
+gene_iqr = gene_q75 - gene_q25
+cell_q25 = np.percentile(cell_data, 25, axis=1, keepdims=True)
+cell_q75 = np.percentile(cell_data, 75, axis=1, keepdims=True)
+cell_iqr = cell_q75 - cell_q25
+
 # Interaction features
 cp_time = all_features["cp_time"].values.reshape(-1, 1) / 72.0
 cp_dose = all_features["cp_dose"].values.reshape(-1, 1)
 
-# PCA x time/dose interactions (expanded to top 20 gene, top 10 cell)
 gene_time_interact = gene_pca[:, :20] * cp_time
 gene_dose_interact = gene_pca[:, :20] * cp_dose
 cell_time_interact = cell_pca[:, :10] * cp_time
 cell_dose_interact = cell_pca[:, :10] * cp_dose
-
-# Cross-PCA: top gene PCA x top cell PCA (captures gene-cell relationships)
-cross_pca = gene_pca[:, :5] * cell_pca[:, :5]  # element-wise, same top 5
-
-# Gene PCA squared (captures non-linear patterns)
+cross_pca = gene_pca[:, :5] * cell_pca[:, :5]
 gene_pca_sq = gene_pca[:, :10] ** 2
 
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
-    gene_pca, cell_pca,
-    gene_var, gene_skew, gene_kurt,
-    cell_var, cell_skew,
+    gene_pca, cell_pca, combined_pca,
+    gene_var, gene_skew, gene_kurt, gene_iqr,
+    cell_var, cell_skew, cell_iqr,
     gene_time_interact, gene_dose_interact,
     cell_time_interact, cell_dose_interact,
-    cross_pca,
-    gene_pca_sq,
+    cross_pca, gene_pca_sq,
 ])
 
 final_scaler = StandardScaler()
@@ -81,9 +87,9 @@ y_train = train_targets[target_cols].values
 trt_idx = np.where(~train_ctrl_mask.values)[0]
 X_trt, y_trt = X_train[trt_idx], y_train[trt_idx]
 
-# Diverse MLP ensemble
+# Diverse MLP ensemble — try wider networks
 configs = [
-    ((512, 256), 0.0005, 42),
+    ((768, 384), 0.0005, 42),
     ((512, 256), 0.0005, 123),
     ((512, 256), 0.0005, 777),
     ((512, 256, 128), 0.001, 42),
