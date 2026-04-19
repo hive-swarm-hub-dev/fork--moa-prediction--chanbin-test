@@ -3,6 +3,8 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.neural_network import MLPClassifier
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.linear_model import LogisticRegression
 
 # Load data
 train_features = pd.read_csv("data/train_features.csv")
@@ -27,18 +29,26 @@ cell_cols = [c for c in all_features.columns if c.startswith("c-")]
 scaler = StandardScaler()
 numeric_data = scaler.fit_transform(all_features[gene_cols + cell_cols])
 
-# PCA
-pca_gene = PCA(n_components=100, random_state=42)
+# PCA — use more components
+pca_gene = PCA(n_components=150, random_state=42)
 gene_pca = pca_gene.fit_transform(numeric_data[:, :len(gene_cols)])
 
-pca_cell = PCA(n_components=30, random_state=42)
+pca_cell = PCA(n_components=50, random_state=42)
 cell_pca = pca_cell.fit_transform(numeric_data[:, len(gene_cols):])
+
+# Stats features
+gene_data = numeric_data[:, :len(gene_cols)]
+cell_data = numeric_data[:, len(gene_cols):]
+gene_var = np.var(gene_data, axis=1, keepdims=True)
+gene_skew = np.mean(gene_data**3, axis=1, keepdims=True)
+cell_var = np.var(cell_data, axis=1, keepdims=True)
 
 # Build feature matrix
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
     gene_pca,
     cell_pca,
+    gene_var, gene_skew, cell_var,
 ])
 
 final_scaler = StandardScaler()
@@ -54,24 +64,37 @@ train_trt_idx = np.where(~train_ctrl_mask.values)[0]
 X_trt = X_train[train_trt_idx]
 y_trt = y_train[train_trt_idx]
 
-# MLP — multi-output natively, captures non-linear interactions
-model = MLPClassifier(
-    hidden_layer_sizes=(256, 128),
+# Model 1: MLP
+mlp = MLPClassifier(
+    hidden_layer_sizes=(512, 256),
     activation="relu",
     solver="adam",
-    alpha=0.001,
+    alpha=0.0005,
     batch_size=256,
     learning_rate="adaptive",
     learning_rate_init=0.001,
-    max_iter=200,
+    max_iter=300,
     early_stopping=True,
     validation_fraction=0.1,
-    n_iter_no_change=10,
+    n_iter_no_change=15,
     random_state=42,
     verbose=False,
 )
-model.fit(X_trt, y_trt)
-test_preds = model.predict_proba(X_test)
+mlp.fit(X_trt, y_trt)
+mlp_preds = mlp.predict_proba(X_test)
+print("MLP done")
+
+# Model 2: LogReg
+lr = OneVsRestClassifier(
+    LogisticRegression(C=0.1, max_iter=2000, solver="lbfgs"),
+    n_jobs=-1,
+)
+lr.fit(X_trt, y_trt)
+lr_preds = lr.predict_proba(X_test)
+print("LogReg done")
+
+# Blend — MLP-heavy since it's been better
+test_preds = 0.7 * mlp_preds + 0.3 * lr_preds
 
 # Clip and zero controls
 test_preds = np.clip(test_preds, 1e-15, 1 - 1e-15)
