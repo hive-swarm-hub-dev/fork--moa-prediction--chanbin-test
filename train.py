@@ -125,6 +125,15 @@ lr_preds = np.mean(lr_preds_list, axis=0)
 # Blend — MLP-heavy since it's stronger
 test_preds = 0.75 * mlp_preds + 0.25 * lr_preds
 
+# Post-processing: calibrate using target priors
+# Scale predictions toward base rate with a soft blend
+target_means = y_trt.mean(axis=0)
+# Gentle calibration: shrink extreme predictions slightly toward prior
+calibration_strength = 0.05
+for i in range(len(target_cols)):
+    prior = target_means[i]
+    test_preds[:, i] = (1 - calibration_strength) * test_preds[:, i] + calibration_strength * prior
+
 # Clip and zero controls
 test_preds = np.clip(test_preds, 1e-15, 1 - 1e-15)
 test_ctrl_indices = np.where(test_ctrl_mask.values)[0]
