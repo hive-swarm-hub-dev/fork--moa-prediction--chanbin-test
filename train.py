@@ -44,15 +44,21 @@ gene_kurt = np.mean(gene_data**4, axis=1, keepdims=True) - 3
 cell_var = np.var(cell_data, axis=1, keepdims=True)
 cell_skew = np.mean(cell_data**3, axis=1, keepdims=True)
 
-# Interaction features: top PCA components * cp_time and cp_dose
-cp_time = all_features["cp_time"].values.reshape(-1, 1) / 72.0  # normalize
+# Interaction features
+cp_time = all_features["cp_time"].values.reshape(-1, 1) / 72.0
 cp_dose = all_features["cp_dose"].values.reshape(-1, 1)
 
-# Top 10 gene PCA * time/dose
-gene_time_interact = gene_pca[:, :10] * cp_time
-gene_dose_interact = gene_pca[:, :10] * cp_dose
-cell_time_interact = cell_pca[:, :5] * cp_time
-cell_dose_interact = cell_pca[:, :5] * cp_dose
+# PCA x time/dose interactions (expanded to top 20 gene, top 10 cell)
+gene_time_interact = gene_pca[:, :20] * cp_time
+gene_dose_interact = gene_pca[:, :20] * cp_dose
+cell_time_interact = cell_pca[:, :10] * cp_time
+cell_dose_interact = cell_pca[:, :10] * cp_dose
+
+# Cross-PCA: top gene PCA x top cell PCA (captures gene-cell relationships)
+cross_pca = gene_pca[:, :5] * cell_pca[:, :5]  # element-wise, same top 5
+
+# Gene PCA squared (captures non-linear patterns)
+gene_pca_sq = gene_pca[:, :10] ** 2
 
 X_all = np.hstack([
     all_features[["cp_type", "cp_time", "cp_dose"]].values,
@@ -61,6 +67,8 @@ X_all = np.hstack([
     cell_var, cell_skew,
     gene_time_interact, gene_dose_interact,
     cell_time_interact, cell_dose_interact,
+    cross_pca,
+    gene_pca_sq,
 ])
 
 final_scaler = StandardScaler()
